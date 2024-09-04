@@ -17,6 +17,6 @@ dependencies:
     - seaborn==0.13.2
     - sentencepiece==0.2.0
     - tokenizers==0.19.1
-    - torch==2.4.0
+    - torch==2.2.0
     - transformers==4.44.0
     - typing-extensions==4.12.2
