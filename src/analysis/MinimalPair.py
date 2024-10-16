@@ -3,52 +3,24 @@
 # (https://github.com/grushaprasad)
 # August 2024
 
+from .Analysis import Analysis
 import pandas as pd
 pd.options.mode.chained_assignment = None  # default='warn' 
 
-class MinimalPairAnalysis:
-    def __init__(self, config: dict):
+class MinimalPair(Analysis):
 
-
-        # Check for necessary parameters 
-
-        for arg in ['predfpath', 'datafpath', 'resultsfpath', 'pred_measure']:
-            assert arg in config, f"Must pass in {arg}"
-            val = config[arg]
-            exec(f"self.{arg} = '{val}'")
-        
-        # Assign optional parameters
-        defaults = {
-            'word_summary': 'mean',
-            'roi_summary': 'micro',
-            'k_lemmas': 'inf', ## include all lemmas
-            'punctuation': 'previous'
-        }
-
-        for arg in defaults:
-            if arg in config:
-                val = config[arg]
-            else:
-                val = defaults[arg]
-            exec(f"self.{arg} = '{val}'")
-
-
-        # Load data
-        self.preddat = pd.read_csv(self.predfpath, sep='\t')
-
-        self.conddat = pd.read_csv(self.datafpath, sep='\t')
+    def __init__(self, config: dict, 
+                **kwargs):
+        super().__init__(config, **kwargs)
 
         # Set topk
 
         try:
-            self.topk = int(self.k_lemmas.strip())
+            self.topk = int(str(self.k_lemmas).strip())
         except:
             if self.k_lemmas != 'all':
-                print('\nINVALID TOP-K LEMMAS, USING ALL LEMMAS IN CALCULATION\n')
-
-            self.topk = len(self.conddat['lemma'].unique())
-
-
+                print('\n**Invalid top-k lemmas. Using all lemmas in calculation**\n')
+                self.k_lemmas = 'all'
 
     def token_to_word(self, preddat):
 
@@ -87,8 +59,27 @@ class MinimalPairAnalysis:
         return grouped_df
 
 
+    def save_interim(self,target_wide_df):
+
+        target_long = pd.melt(target_wide_df,
+                              value_vars = ['expected', 'unexpected'], 
+                              id_vars=['pairid','pos', 'model','condition','lemma'],
+                              value_name = self.pred_measure)
+
+        
+        cols = ['model', 'pairid', 'lemma', 'condition', 'comparison']
+        summ = target_long.groupby(cols).agg({self.pred_measure: ['sum','mean']}).reset_index()
+        summ.columns = list(map(''.join, summ.columns.values))
+        fname = f"{self.resultsfpath.replace('.tsv', '')}_byROI.tsv"
+        print(f"Saving interim file: {fname}")
+        summ.to_csv(fname, sep = '\t', na_rep='NA')
+
+
+
+
     def summarize_roi(self, by_word):
         merged = pd.merge(by_word,self.conddat, on='sentid')
+        merged = merged.astype({'ROI': 'string'}) # to avoid autocasting if ROIs have only one val
 
         # Exclude non ROI words
         merged['ROI'] = merged['ROI'].apply(lambda x: [int(item.strip()) for item in x.split(',')])
@@ -99,21 +90,29 @@ class MinimalPairAnalysis:
 
         # Get consistent ROI mapping across comparisons
         target['mapping'] = target.apply(lambda x: {curr:new for new, curr in enumerate(x['ROI'])}, axis=1)
-        # target['wordpos_mod'] = target['wordpos_mod'].apply(lambda x: str(x))
         target['pos'] = target.apply(lambda x: x['mapping'][x['wordpos_mod']], axis=1)
+
 
         # Specify pred measure
         pred_measure = self.get_measure()
 
-        # Compare pairs for each ROI (micro measures, accuracy)
-        groupby_cols = ['pairid', 'model', 'condition', 'lemma', 'contextid']
-
+       
+        # Make data wider; compute difference and accuracy
         target_wide = target.pivot(index=['pairid', 'pos', 'model', 'condition','lemma', 'contextid'], columns='comparison', values=pred_measure).reset_index()
 
         target_wide['microdiff'] = self.get_diff(target_wide, 'micro')
         target_wide['acc'] = self.get_acc(target_wide)
 
+        # Filter topk lemmas
+        if self.k_lemmas != 'all':
+            target_wide = self.filter_lemma(target_wide)
+
+        # Save interim state before computing summarizing
+        self.save_interim(target_wide)
+
         # Summarize over ROIs
+        groupby_cols = ['pairid', 'model', 'condition', 'lemma', 'contextid']
+
         by_pair = target_wide.groupby(groupby_cols).agg({'expected': 'mean', 'unexpected': 'mean', 'microdiff': 'mean', 'acc': 'mean'}).reset_index()
 
         # Compute perplexity
@@ -150,8 +149,7 @@ class MinimalPairAnalysis:
         else:
             return 'surp'
 
-    def summarize_lemma(self, by_pair):
-
+    def filter_lemma(self, target_wide):
         if self.pred_measure == 'prob':
             ascending = False
         else:
@@ -159,12 +157,16 @@ class MinimalPairAnalysis:
 
         groupby_cols = ['contextid','model', 'condition']
 
-        print('PRINTING TOP K', self.topk)
+        by_lemma = target_wide.sort_values(by=['expected'], ascending=ascending).groupby(groupby_cols).head(self.topk).reset_index(drop=True)
 
-        by_lemma = by_pair.sort_values(by=['expected'], ascending=ascending).groupby(groupby_cols).head(self.topk).reset_index(drop=True)
+        return by_lemma
 
 
-        by_context = by_lemma.groupby(groupby_cols).agg({'microdiff': 'mean', 'macrodiff': 'mean', 'acc': 'mean'}).reset_index()
+
+    def summarize_lemma(self, by_pair):
+        groupby_cols = ['contextid','model', 'condition']
+
+        by_context = by_pair.groupby(groupby_cols).agg({'microdiff': 'mean', 'macrodiff': 'mean', 'acc': 'mean'}).reset_index()
 
         return by_context
 
@@ -176,7 +178,7 @@ class MinimalPairAnalysis:
         return by_cond
 
 
-    def run(self):
+    def analyze(self):
         """ Run Minimal Pair analysis and save result to resultsfpath
 
         The output has the following information. 
@@ -192,30 +194,14 @@ class MinimalPairAnalysis:
         # comparison summarized over all ROIs for each pair 
         by_pair = self.summarize_roi(by_word)
 
+        ## TO DO: refactor this so it is just summary over user specified columns
+
         # summarize over lemmas
         by_context = self.summarize_lemma(by_pair)
 
         # summarize over contexts
         by_cond = self.summarize_context(by_context)
 
+        print(f'Creating {self.resultsfpath}\n')
         by_cond.to_csv(self.resultsfpath, sep = '\t', na_rep='NA')
-
-
-## Tests
-
-config = {
-    'predfpath': '../../../predictions/minimal_pairs.tsv',
-    'datafpath': '../../../data/minimal_pairs.tsv',
-    'resultsfpath': '../../../results/minimal_pairs.tsv',
-    'pred_measure': 'surp',
-    'roi_summary': 'micro',
-    'k_lemmas': '1'
-}
-
-x = MinimalPairAnalysis(config)
-
-# from pprint import pprint
-# pprint(vars(x))
-
-x.run()
-
+        

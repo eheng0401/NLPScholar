@@ -25,8 +25,10 @@ class HFTokenizer(Tokenizer):
                     self._tokenizer.pad_token = self._tokenizer.eos_token
                     sys.stderr.write(f"Using {self._tokenizer.eos_token} as pad token\n")
                 else:
+                    self._tokenizer.add_special_tokens({'pad_token': '[PAD]'})
                     sys.stderr.write(f"There is no eos token for the "\
-                                     "tokenizer\n")
+                                     "tokenizer. Creating a new token to use "\
+                                     "as a pad token, [PAD].\n")
             elif self.addPadToken:
                 token_id = self.encode(self.addPadToken)
                 if len(token_id) != 1:
@@ -54,6 +56,14 @@ class HFTokenizer(Tokenizer):
     @property 
     def mask_token_id(self) -> int:
         return self._tokenizer.mask_token_id
+
+    @property 
+    def sep_token_id(self) -> int:
+        return self._tokenizer.sep_token_id
+
+    @property 
+    def cls_token_id(self) -> int:
+        return self._tokenizer.cls_token_id
 
     def IsSkipTokenID(self, token_id: int) -> bool:
         """ Whether the token id is for a skippable token. We consider cls, sep,
@@ -160,12 +170,13 @@ class HFTokenizer(Tokenizer):
                      padding=padding, truncation=truncation, 
                      max_length = max_length, return_tensors=return_tensors)
 
-    def align_words_ids(self, text):
+    def align_words_ids(self, text, add_special_tokens=False):
         # batchify 
         if isinstance(text, str):
             text = [text]
         text = self.LowerCaseText(text)
-        encoded = self._tokenizer(text, padding=True)
+        encoded = self._tokenizer(text, padding=True, 
+                                  add_special_tokens=False)
         data = []
         for batch in range(len(encoded['input_ids'])):
             mapping = encoded.word_ids(batch)
